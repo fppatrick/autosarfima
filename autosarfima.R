@@ -370,9 +370,6 @@ fit_sarfima_cv <- function(timeseries,
     params = best_params,
     d = d_frac$d,
     D = d_frac$D
-    #cv_error = errors[best],
-    #fc = fc,
-    #all_errors = errors
   )
 }
 
