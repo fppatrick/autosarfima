@@ -19,7 +19,7 @@ are used to compute the error metric and guide model selection.
 
 ---
 
-## Installation
+## Installation and example of use
 Ensure you have the 'mquantile.R' and 'mqper.R' files
 ```R
 set.seed(123)
