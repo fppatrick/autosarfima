@@ -162,43 +162,10 @@ frac_diff <- function(timeseries, d = 0, D = 0, S = NULL) {
   return(y)
 }
 #-------------------------------
-# This function computes the univariate robust M-periodogram using M-regression.
-#-------------------------------
-MPerioReg <- function(timeseries) {
-  n <- length(timeseries)
-  perior <- FFT <- NULL
-  g <- n %/% 2
-  for (j in 1:g) {
-    X1 <- X2 <- NULL
-    w <- 2 * pi * j / n
-    for (i in 1:n) {
-      X1[i] <- cos(w * i)
-      X2[i] <- sin(w * i)
-    }
-    if (j != (n / 2)) {
-      MX <- cbind(X1, X2)
-      fitrob <- rlm(timeseries ~ MX - 1, method = "M", psi = MASS::psi.huber)
-      FFT[j] <- sqrt(n / (8 * pi)) * complex(real = fitrob$coef[1], imaginary = -fitrob$coef[2])
-    }
-    else {
-      MX <- cbind(X1)
-      fitrob <- rlm(timeseries ~ MX - 1, method = "M", psi = MASS::psi.huber)
-      FFT[j] <- sqrt(n / (2 * pi)) * complex(real = fitrob$coef[1], imaginary = -0)
-    }
-    perior[j] <- Mod(FFT[j])^2
-  }
-  w <- 2 * pi * seq_len(g) / n
-  if ((n %% 2) != 0) {
-    return(list(perior = perior, freq = w))
-  } else {
-    return(list(perior = perior[-g], freq = w[-g]))
-  }
-}
-#-------------------------------
 # This function estimate the fractional long-memory parameters (non-seasonal and, 
 # if applicable, seasonal).
 #-------------------------------
-RobustdSperio <- function(timeseries, bandw.exp = 0.8, S) {
+RobustdSperio <- function(timeseries, bandw.exp = 0.8, S, tau = 0.5) {
   
   if (!is.numeric(timeseries)) timeseries <- as.numeric(timeseries)
   timeseries <- na.fail(as.ts(timeseries))
@@ -210,10 +177,10 @@ RobustdSperio <- function(timeseries, bandw.exp = 0.8, S) {
   n <- length(timeseries)
   g <- trunc(n^bandw.exp)
   j <- 1:g
-
-  timeseries <- timeseries - mean(timeseries, na.rm = TRUE)
   
-  perior <- MPerioReg(timeseries = timeseries)
+  
+  perior <- mqper(timeseries = timeseries, tau = tau)
+  
   per <- (perior$perior) / (2 * pi)
   
   if (length(per) < g) stop("Series to short for the choosen bandw.exp")
@@ -232,16 +199,20 @@ RobustdSperio <- function(timeseries, bandw.exp = 0.8, S) {
   
   if (S != 0) {
     D.reg <- log((2 * sin(S * w / 2))^2)
-    X <- cbind(1, -D.reg, -d.reg)
-    colnames(X) <- c("Intercept", "D.reg", "d.reg")
+    X <- cbind(-D.reg, -d.reg)
+    colnames(X) <- c("D.reg", "d.reg")
   } else {
-    X <- cbind(1, -d.reg)
-    colnames(X) <- c("Intercept", "d.reg")
+    X <- cbind(-d.reg)
+    colnames(X) <- c("d.reg")
   }
   
-  fit <- rlm(X, y.reg, method = "M", psi = psi.huber)
-
-  coefs <- coef(fit)
+  colnames(X)
+  
+  fit <- mqlm(X, y.reg, maxit = 100, q = tau, k = 1.345)
+  
+  coefs <- as.data.frame(t(coef(fit)))
+  
+  colnames(coefs) <- c('Intercept', colnames(X))
   
   d <- coefs["d.reg"]
   
@@ -262,11 +233,11 @@ RobustdSperio <- function(timeseries, bandw.exp = 0.8, S) {
 # If you are sure about the time series features set the value in the
 # fit_sarfima_cv function (parameter S).
 #-------------------------------
-Period <- function(timeseries, candidates = c(0,7,12)) {
+Period <- function(timeseries, candidates = c(0,7,12), tau = 0.5) {
   
   modts = timeseries - mean(timeseries)
   
-  robper <- MPerioReg(timeseries = timeseries)
+  robper <- mqper(timeseries = timeseries, tau = tau)
   
   freqs <- robper$freq
   

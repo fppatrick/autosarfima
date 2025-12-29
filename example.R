@@ -1,3 +1,5 @@
+rm(list = ls())
+graphics.off()
 set.seed(123)
 # Define the SARFIMA model parameters
 sarfima_model <- list(
@@ -20,9 +22,9 @@ plot(ts_data, main = "Simulated SARFIMA Process")
 # Check the Autocorrelation Function (ACF)
 acf(ts_data, lag.max = 100, main = "Simulated SARFIMA Process")
 # Load the necessary functions
-source('autosarfima.R')
-source('mqper.R')
 source('mquantile.R')
+source('mqper.R')
+source('autosarfima.R')
 # Define the train series
 TT <- length(ts_data)
 train <- TT - 90
@@ -46,9 +48,9 @@ legend("topleft",
        bty = 'n', lty = c(1,1))
 # Estimate the cross-validation model
 fit_cv <- fit_sarfima_cv(timeseries = ts_train, nonseas_max = c(2,2), 
-                         seas_max = c(2,2), S = 12, k = 45)
+                         seas_max = c(2,2), S = 12, k = 30)
 # Predictions
-fc_cv <- fc_sarfima(obj = fit_cv, h = 90, level = 0)
+fc_cv <- fc_sarfima(obj = fit_cv, h = 90, level = 0, S = 12)
 # Plot the results
 plot.ts(c(ts_train, fc_cv$mean), main = 'Cros validation', col = 'blue',
         ylab = 'series')
