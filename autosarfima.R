@@ -19,7 +19,7 @@
 #'
 #' @param timeseries A univariate time series object.
 #' @param bandw.exp Coefficient bandwich that will truncate the spectrum length.
-#'   Default: `0.78`
+#'   Default: `0.8`
 #' @param candidates Integer vector of possible seasonal periods.  
 #'   Default: `c(0, 7, 12)`.
 #' @param include.mean Logical indicating whether the mean should be included
@@ -71,41 +71,134 @@ m_data <- function(timeseries){
   return(timeseries)
 }
 #-------------------------------
-# Function to pass the filters non-seasonal and seasonal.
+# Function to pass the non-seasonal filter.
 #-------------------------------
 frac_filter <- function(timeseries, d) {
   
-  stopifnot((TT <- length(timeseries)) >= 2)
-  #x <- x - mean(x)
-  np2 <- nextn(TT+TT - 1L)
+  stopifnot(
+    is.numeric(timeseries),
+    length(timeseries) >= 2,
+    is.numeric(d),
+    abs(d) < 1
+  )
   
-  pad <- rep.int(0, np2-TT)
+  TT <- length(timeseries)
+  
+  nfft <- nextn(2 * TT - 1L)
+  pad  <- rep.int(0, nfft - TT)
   
   k <- seq_len(TT - 1L)
   
-  b <- c(1, cumprod((k - (d+1))/ k), pad)
-  ## ~= convolve(x, b, type = "filter") :
+  b <- numeric(TT)
+  b[1] <- 1
+  b[-1] <- cumprod((k - (d + 1)) / k)
   
-  dx <- fft(fft(b) * fft(c(timeseries, pad)), inverse =TRUE)[seq_len(TT)] / np2
+  b <- c(b, pad)
   
-  Re(dx)
+  dx <- fft(fft(b) * fft(c(timeseries, pad)), inverse = TRUE)[seq_len(TT)] / nfft
+  
+  dx <- Re(dx)
+  
+  return(dx)
 }
+#-------------------------------
+# Function to pass the non-seasonal filter.
+#-------------------------------
+sfrac_filter <- function(timeseries, D, S) {
+  
+  stopifnot(
+    is.numeric(timeseries),
+    length(timeseries) >= 2,
+    is.numeric(D),
+    abs(D) < 1,
+    is.numeric(S),
+#    S >= 2,
+    S == as.integer(S)
+  )
+  
+  TT <- length(timeseries)
+  
+  # Number of seasonal lags available
+  m <- floor((TT - 1) / S)
+  
+  # Seasonal binomial coefficients
+  k <- 0:m
+  b_seas <- (-1)^k * choose(D, k)
+  
+  # Embed seasonal filter into full lag polynomial
+  b <- numeric(TT)
+  b[1 + k * S] <- b_seas
+  
+  # Linear convolution via FFT
+  nfft <- nextn(2 * TT - 1L)
+  pad  <- rep.int(0, nfft - TT)
+  
+  dx <- fft(fft(c(b, pad)) * fft(c(timeseries, pad)),
+            inverse = TRUE)[seq_len(TT)] / nfft
+  
+  dx <- Re(dx)
+  
+  return(dx)
+}
+
 #-------------------------------
 # Function to differentiate the series using fractional parameters
 #-------------------------------
-frac_diff <- function(timeseries,d,D){
+frac_diff <- function(timeseries, d = 0, D = 0, S = NULL) {
   
-  y <- frac_filter(timeseries = timeseries, d = d)
+  y <- timeseries
   
-  u <- frac_filter(timeseries = y, d = D)
+  if (!is.null(d) && d != 0) {
+    y <- frac_filter(timeseries = y, d = d)
+  }
   
-  return(u)
+  if (!is.null(D) && D != 0) {
+    if (is.null(S)) {
+      stop("Seasonal period 's' must be provided when D != 0.")
+    }
+    y <- sfrac_filter(timeseries = y, D = D, S = S)
+  }
+  
+  return(y)
+}
+#-------------------------------
+# This function computes the univariate robust M-periodogram using M-regression.
+#-------------------------------
+MPerioReg <- function(timeseries) {
+  n <- length(timeseries)
+  perior <- FFT <- NULL
+  g <- n %/% 2
+  for (j in 1:g) {
+    X1 <- X2 <- NULL
+    w <- 2 * pi * j / n
+    for (i in 1:n) {
+      X1[i] <- cos(w * i)
+      X2[i] <- sin(w * i)
+    }
+    if (j != (n / 2)) {
+      MX <- cbind(X1, X2)
+      fitrob <- rlm(timeseries ~ MX - 1, method = "M", psi = MASS::psi.huber)
+      FFT[j] <- sqrt(n / (8 * pi)) * complex(real = fitrob$coef[1], imaginary = -fitrob$coef[2])
+    }
+    else {
+      MX <- cbind(X1)
+      fitrob <- rlm(timeseries ~ MX - 1, method = "M", psi = MASS::psi.huber)
+      FFT[j] <- sqrt(n / (2 * pi)) * complex(real = fitrob$coef[1], imaginary = -0)
+    }
+    perior[j] <- Mod(FFT[j])^2
+  }
+  w <- 2 * pi * seq_len(g) / n
+  if ((n %% 2) != 0) {
+    return(list(perior = perior, freq = w))
+  } else {
+    return(list(perior = perior[-g], freq = w[-g]))
+  }
 }
 #-------------------------------
 # This function estimate the fractional long-memory parameters (non-seasonal and, 
 # if applicable, seasonal).
 #-------------------------------
-RobustdSperio <- function(timeseries, bandw.exp = 0.78, tau = 0.5) {
+RobustdSperio <- function(timeseries, bandw.exp = 0.8, S) {
   
   if (!is.numeric(timeseries)) timeseries <- as.numeric(timeseries)
   timeseries <- na.fail(as.ts(timeseries))
@@ -117,26 +210,28 @@ RobustdSperio <- function(timeseries, bandw.exp = 0.78, tau = 0.5) {
   n <- length(timeseries)
   g <- trunc(n^bandw.exp)
   j <- 1:g
-  w <- 2 * pi * j / n
-  
+
   timeseries <- timeseries - mean(timeseries, na.rm = TRUE)
   
-  per <- mqper(timeseries = timeseries, tau = tau)$perior
+  perior <- MPerioReg(timeseries = timeseries)
+  per <- (perior$perior) / (2 * pi)
   
   if (length(per) < g) stop("Series to short for the choosen bandw.exp")
   
-  periodogram <- per[1:g]
+  periodogram <- per[1:g] 
+  w <- perior$freq[1:g]
   
-  s <- Period(timeseries = timeseries)
   
-  if (is.null(s) || s < 0) s <- 0
+  if (is.null(S) || S==FALSE) {
+    S <- Period(timeseries = timeseries)
+  }
   
   y.reg <- log(periodogram)
   
   d.reg <- log((2 * sin(w / 2))^2)
   
-  if (s != 0) {
-    D.reg <- log((2 * sin(s * w / 2))^2)
+  if (S != 0) {
+    D.reg <- log((2 * sin(S * w / 2))^2)
     X <- cbind(1, -D.reg, -d.reg)
     colnames(X) <- c("Intercept", "D.reg", "d.reg")
   } else {
@@ -144,26 +239,34 @@ RobustdSperio <- function(timeseries, bandw.exp = 0.78, tau = 0.5) {
     colnames(X) <- c("Intercept", "d.reg")
   }
   
-  fit <- rlm(X, y.reg, psi = psi.huber)
-  
+  fit <- rlm(X, y.reg, method = "M", psi = psi.huber)
+
   coefs <- coef(fit)
   
   d <- coefs["d.reg"]
   
   D <- if ("D.reg" %in% names(coefs)) coefs["D.reg"] else 0
   
-  return(list(d = as.numeric(d), D = as.numeric(D)))
+  #return(list(d = as.numeric(d), D = as.numeric(D)))
+  res <- list(d = as.numeric(d), D = as.numeric(D))
+  
+  # res$d <- ifelse(abs(res$d) > 0.5, 0, res$d)
+  # 
+  # res$D <- ifelse(abs(res$D) > 0.5, 0, res$D)
+  
+  return(res)
+  
 }
 #-------------------------------
 # Function to calculate the periodicity based on the Robust periodogram. 
 # If you are sure about the time series features set the value in the
 # fit_sarfima_cv function (parameter S).
 #-------------------------------
-Period <- function(timeseries, candidates = c(0,7,12), tau= 0.5) {
+Period <- function(timeseries, candidates = c(0,7,12)) {
   
   modts = timeseries - mean(timeseries)
   
-  robper <- mqper(timeseries = timeseries, tau = tau)
+  robper <- MPerioReg(timeseries = timeseries)
   
   freqs <- robper$freq
   
@@ -191,7 +294,7 @@ Period <- function(timeseries, candidates = c(0,7,12), tau= 0.5) {
 #-------------------------------
 # Rolling cross-validation of the SARFIMA model. If you do not know 
 # what you are doing would be better you use auto.arima function from 
-# forecast package. If you do not have at least a basic backgorund of time series... 
+# forecast package. If you do not have at least a basic background of time series... 
 # Please, stay away for now and call someone who has.
 #-------------------------------
 fit_sarfima_cv <- function(timeseries,
@@ -201,8 +304,8 @@ fit_sarfima_cv <- function(timeseries,
                            metric = "RMSE",
                            rm_out = FALSE,
                            S = 7,
-                           h = 1,
-                           k = 35,
+                           h = NULL,
+                           k = 30,
                            method = "CSS") {
   
   start_time <- Sys.time()
@@ -218,7 +321,7 @@ fit_sarfima_cv <- function(timeseries,
   
   TT <- length(clean_series)
   
-  if (is.null(h) || h==FALSE) h <- round(0.1 * TT)
+  if (is.null(h) || h==FALSE) h <- floor(0.15 * TT/k)
   
   if (is.null(S) || S==FALSE) {
     S <- Period(timeseries = clean_series)
@@ -244,13 +347,13 @@ fit_sarfima_cv <- function(timeseries,
   # }
   
   
-  d_frac <- RobustdSperio(timeseries = diff_series)
+  d_frac <- RobustdSperio(timeseries = diff_series, S = S)
   
   d_vals <- unique(c(0:diffs))
   
   D_vals <- unique(c(0:1))
   
-  frac_series <- frac_diff(timeseries = timeseries, d = d_frac$d, D = d_frac$D)
+  frac_series <- frac_diff(timeseries = timeseries, d = d_frac$d, D = d_frac$D, S = S)
   
   par_grid <- expand_grid(p=0:nonseas_max[1], d=d_vals, q=0:nonseas_max[2],
                           P=0:seas_max[1], D=D_vals, Q=0:seas_max[2])
@@ -347,7 +450,7 @@ fit_sarfima_cv <- function(timeseries,
   
   best <- which.min(errors)
   
-  best_params <- results[[best]]$params
+  best_params <- as.numeric(results[[best]]$params)
   
   best_model <- tryCatch({
     Arima(frac_series,
@@ -361,6 +464,11 @@ fit_sarfima_cv <- function(timeseries,
     stop("Best model failed to fit on full dataset.")
   }
   
+  # best_model$arma <- c(best_params[1], best_params[3], best_params[4],
+  #                            best_params[6], S,
+  #                            round(best_params[2] + d_frac$d, 2),
+  #                            round(best_params[5] + d_frac$D, 2))
+
   end_time <- Sys.time()
   time_elapsed <- end_time - start_time
   cat("Time elapsed: ", round(time_elapsed, 2), " ", attr(time_elapsed, "units"), "\n")
@@ -370,10 +478,16 @@ fit_sarfima_cv <- function(timeseries,
     params = best_params,
     d = d_frac$d,
     D = d_frac$D
+    #cv_error = errors[best],
+    #fc = fc,
+    #all_errors = errors
   )
 }
-
-fc_sarfima <- function(obj, h, level){
+#-------------------------------
+# Function to forecast the orinal series given the model suggested by 
+# fit_sarfima_cv function
+#-------------------------------
+fc_sarfima <- function(obj, h, level, S){
   
   frac_fc <- forecast::forecast(obj = obj[["model"]], h = h, level = level)
   
@@ -388,7 +502,7 @@ fc_sarfima <- function(obj, h, level){
   TT <- nrow(df)
   train <- TT - h
   
-  df_orig <- sapply(df, frac_diff, d = -obj[["d"]], D = -obj[["D"]])
+  df_orig <- sapply(df, frac_diff, d = -obj[["d"]], D = -obj[["D"]], S = S)
   
   df_orig <- as.data.frame(df_orig[(train+1):TT,])
   
