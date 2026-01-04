@@ -33,6 +33,8 @@
 #' @param metric Character string indicating the accuracy metric to optimise.
 #'   Options: `"RMSE"` or `"MAE"`.  
 #'   Default: `"RMSE"`.
+#' @param tau Quantile paramters satisfying 0 < tau < 1.
+#'   Default: tau = 0.5
 #' @param rm_out Logical indicating whether outliers should be removed from the
 #'   input time series prior to model fitting.  
 #'   Default: `FALSE`.
@@ -190,7 +192,7 @@ RobustdSperio <- function(timeseries, bandw.exp = 0.8, S, tau = 0.5) {
   
   
   if (is.null(S) || S==FALSE) {
-    S <- Period(timeseries = timeseries)
+    S <- Period(timeseries = timeseries, tau = tau)
   }
   
   y.reg <- log(periodogram)
@@ -263,6 +265,65 @@ Period <- function(timeseries, candidates = c(0,7,12), tau = 0.5) {
   return(sea_per)
 }
 #-------------------------------
+# This function estimate the fractional long-memory parameters (non-seasonal and, 
+# if applicable, seasonal).
+#-------------------------------
+RobustdSperio <- function(timeseries, bandw.exp = 0.8, S, tau) {
+  
+  if (!is.numeric(timeseries)) timeseries <- as.numeric(timeseries)
+  timeseries <- na.fail(as.ts(timeseries))
+  
+  if (!is.null(dim(timeseries))) stop("Only univariate time series are allowed")
+  
+  if (any(is.na(timeseries))) stop("There are NA values")
+  
+  n <- length(timeseries)
+  g <- trunc(n^bandw.exp)
+  j <- 1:g
+
+  timeseries <- timeseries - mean(timeseries)
+  
+  perior <- mqper(timeseries = timeseries, tau = tau)
+  per <- perior$perior / (2*pi)
+  
+  if (length(per) < g) stop("Series to short for the choosen bandw.exp")
+  
+  periodogram <- per[1:g]
+  w <- perior$freq[1:g]
+
+  if (is.null(S) || !(is.numeric(S))) {
+    S <- Period(timeseries = timeseries, tau = tau)
+  }
+  
+  y.reg <- log(periodogram)
+  
+  d.reg <- log((2 * sin(w / 2))^2)
+
+  if (!(S==0)) {
+    D.reg <- log((2 * sin(S * w / 2))^2)
+    X <- cbind(-D.reg, -d.reg)
+    colnames(X) <- c("D.reg", "d.reg")
+  } else {
+    X <- cbind(-d.reg)
+    colnames(X) <- "d.reg"
+  }
+  
+  fit <- mqlm(X, y.reg, maxit = 100, q = tau, k = 1.345)
+
+  coefs <- coef(fit)
+
+  names(coefs) <- c("Intercept", colnames(X))
+
+  d <- coefs["d.reg"]
+  
+  D <- if ("D.reg" %in% names(coefs)) coefs["D.reg"] else 0
+  
+  res <- list(d = as.numeric(d), D = as.numeric(D))
+
+  return(res)
+  
+}
+#-------------------------------
 # Rolling cross-validation of the SARFIMA model. If you do not know 
 # what you are doing would be better you use auto.arima function from 
 # forecast package. If you do not have at least a basic background of time series... 
@@ -277,7 +338,8 @@ fit_sarfima_cv <- function(timeseries,
                            S = 7,
                            h = NULL,
                            k = 30,
-                           method = "CSS") {
+                           method = "CSS",
+                           tau = 0.5) {
   
   start_time <- Sys.time()
   
@@ -292,13 +354,13 @@ fit_sarfima_cv <- function(timeseries,
   
   TT <- length(clean_series)
   
-  if (is.null(h) || h==FALSE) h <- floor(0.15 * TT/k)
+  if (is.null(h) || is.na(h)) {h <- floor(0.1 * TT/k)}
   
-  if (is.null(S) || S==FALSE) {
-    S <- Period(timeseries = clean_series)
+  if (is.null(S) || is.na(S)) {
+    S <- Period(timeseries = clean_series, tau = tau)
   }
   
-  if (!(S %in% c(0, 7, 12)))
+  if (!(S %in% c(1, 7, 12)))
     warning("Please confirm the seasonal period of the series.")
   
   diffs <- ndiffs(clean_series)
@@ -309,16 +371,13 @@ fit_sarfima_cv <- function(timeseries,
     diff_series <- diff(clean_series)
   } else {
     diff_series <- clean_series
+  }  
+
+  if (!(S %in% c(0,1)) && !(is.null(S))) {
+    sdiff_series <- diff(diff_series, lag = S)
   }
   
-  # if(!(S==0)) {
-  #   sdiff_series <- diff(diff_series, S)
-  # } else {
-  #   sdiff_series <- diff_series
-  # }
-  
-  
-  d_frac <- RobustdSperio(timeseries = diff_series, S = S)
+  d_frac <- RobustdSperio(timeseries = sdiff_series, S = S, tau = tau)
   
   d_vals <- unique(c(0:diffs))
   
@@ -435,11 +494,6 @@ fit_sarfima_cv <- function(timeseries,
     stop("Best model failed to fit on full dataset.")
   }
   
-  # best_model$arma <- c(best_params[1], best_params[3], best_params[4],
-  #                            best_params[6], S,
-  #                            round(best_params[2] + d_frac$d, 2),
-  #                            round(best_params[5] + d_frac$D, 2))
-
   end_time <- Sys.time()
   time_elapsed <- end_time - start_time
   cat("Time elapsed: ", round(time_elapsed, 2), " ", attr(time_elapsed, "units"), "\n")
@@ -449,9 +503,6 @@ fit_sarfima_cv <- function(timeseries,
     params = best_params,
     d = d_frac$d,
     D = d_frac$D
-    #cv_error = errors[best],
-    #fc = fc,
-    #all_errors = errors
   )
 }
 #-------------------------------
